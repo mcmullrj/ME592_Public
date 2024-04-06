@@ -3,6 +3,7 @@ classdef CombineRL
     
     properties
         Environment = [];
+        Agent = [];
     end
     
     methods
@@ -12,8 +13,10 @@ classdef CombineRL
             obj.Environment.Combine.Performance = load('CombinePerformanceNorm.mat');
         end
         
-        function obj = CreateField(obj,Acres,MeanYield,StDevYield)
+        function obj = CreateField(obj,Acres,MeanYield,StDevYield,FieldConsistency)
             %create field environment
+            %FieldConsistency approx. 0.05 to 0.1 - standard deviation
+            %multiplier for total crop volume
             %
             %update units
             Acres = Acres*4047; %m^2 from acres
@@ -23,7 +26,6 @@ classdef CombineRL
             %Mean Moisture = percent
             %
             %constants
-            %56 lbs/bu, convert to mass or keep as volume?
             MassFractionGrain = 0.4; %guess volume fraction and mass fraction are similar
             %
             %assume field is square and ignore end rows, length = width
@@ -49,7 +51,7 @@ classdef CombineRL
             %standard distributions
             YieldDeviation = StDevYield.*(randn(size(YieldMapCoarse.Rows)));
             YieldMapCoarse.GrainVolume = MeanYield+YieldDeviation;
-            CropVolumeDeviation = (0.05.*MassFractionGrain).*(randn(size(YieldMapCoarse.Rows)));
+            CropVolumeDeviation = (FieldConsistency.*MassFractionGrain).*(randn(size(YieldMapCoarse.Rows)));
             YieldMapCoarse.CropVolume = YieldMapCoarse.GrainVolume./(MassFractionGrain+CropVolumeDeviation);
             FieldMap.GrainVolume = griddata(YieldMapCoarse.Rows,YieldMapCoarse.Columns,YieldMapCoarse.GrainVolume,ones(length(RowCoordinate),1)*RowCoordinate,(ones(length(RowCoordinate),1)*RowCoordinate)','natural');
             FieldMap.CropVolume = griddata(YieldMapCoarse.Rows,YieldMapCoarse.Columns,YieldMapCoarse.CropVolume,ones(length(RowCoordinate),1)*RowCoordinate,(ones(length(RowCoordinate),1)*RowCoordinate)','natural');
@@ -121,6 +123,19 @@ classdef CombineRL
             obj.Environment.Harvest.FieldPath = FieldLong;
         end
         
+        function obj = DefineControl(obj,GrainValue,FuelValue,ControlSettings,StartingFieldIndex)
+            %set control parameters
+            %define magnitude for rewards
+            obj.Agent.Reward.GrainValue = GrainValue;
+            obj.Agent.Reward.FuelValue = FuelValue;
+            %
+            %define control inputs
+            obj.Agent.Control.TimeStepStateUpdate = ControlSettings(1);
+            obj.Agent.Control.Gains = ControlSettings(2:3); %proportional, integral
+            obj.Agent.Control.InitialState = ControlSettings(4:6); %battery SOC, motor power, engine power
+            obj.Agent.Control.FieldIndexStart = StartingFieldIndex;
+        end
+        
         function [StateVectorFinal,RewardFinal,DiagnosticsFinal,RewardMean] = OperateCombine(obj)
             %solve path through virtual field
             %
@@ -129,10 +144,18 @@ classdef CombineRL
                 FlowCropRef SpeedCombineRef TotalPowerRef EnginePowerRef FuelEfficiencyRef BatteryCapacity BatteryMaxChargeRate BatteryMaxDischargeRate MotorEfficiency GrainPrice FuelPrice
             %
             %
+            %control settings
+            DurationTimeStep = obj.Agent.Control.TimeStepStateUpdate;
+            BatterySOC = obj.Agent.Control.InitialState(1);
+            PowerEngineRequest = obj.Agent.Control.InitialState(3);
+            PowerMotorRequest = obj.Agent.Control.InitialState(2);
+            FieldIndexStart = obj.Agent.Control.FieldIndexStart; %start at first grid
+            CombineSettingSetpoint = 1.0;
+            %
+            %
             %reward definition
-            DurationTimeStep = 20; %sec
-            GrainPrice = 0.2;
-            FuelPrice = 5;
+            GrainPrice = obj.Agent.Reward.GrainValue;
+            FuelPrice = obj.Agent.Reward.FuelValue;
             %
             %
             %combine definition
@@ -153,26 +176,21 @@ classdef CombineRL
             %
             %
             %field definition
-            FieldPath = obj.Environment.Harvest.FieldPath;
+            if FieldIndexStart > 1 && FieldIndexStart < length(FieldPath(:,1))
+                FieldPath = [obj.Environment.Harvest.FieldPath(FieldIndexStart:end,:);obj.Environment.Harvest.FieldPath(1:FieldIndexStart-1,:)];
+            else
+                FieldPath = obj.Environment.Harvest.FieldPath;
+            end
             FieldMapGridDistance = FieldPath(2,1)-FieldPath(1,1); %m/grid
             SpeedCombineInterp = (0:0.02:1).*SpeedCombineRef.*1000./3600; %m/sec
             GridsPerTimeStepInterp = (SpeedCombineInterp./FieldMapGridDistance).*DurationTimeStep;
-            %
-            %
-            %initialize system control
-            FieldIndexStartTimeStep = 1; %start at first grid 
-%             PowerEngineRequest = EnginePowerRef;
-            PowerEngineRequest = 300;
-%             PowerMotorRequest = TotalPowerRef-EnginePowerRef;
-            PowerMotorRequest = 20;
-            CombineSettingSetpoint = 1.0;
-            BatterySOC = 0.5;
             %
             %
             %simulate combine through field
             StateVectorFinal = [];
             RewardFinal = [];
             DiagnosticsFinal = [];
+            FieldIndexStartTimeStep = 1;
             MaxFieldIndexStart = (length(FieldPath(:,1))-max(GridsPerTimeStepInterp));
             while FieldIndexStartTimeStep < MaxFieldIndexStart
                 [StateVector,Reward,Diagnostics] = ControlCombine(FieldIndexStartTimeStep,BatterySOC,PowerEngineRequest,PowerMotorRequest,CombineSettingSetpoint);
@@ -182,7 +200,15 @@ classdef CombineRL
                 RewardFinal = [RewardFinal;Reward];
                 DiagnosticsFinal = [DiagnosticsFinal;Diagnostics];
                 %feedback controller
-                
+                if PowerMotorRequest >= 0 %using battery energy
+                    if BatterySOC < 0.3
+                        PowerMotorRequest = -25; %charge battery
+                    end
+                else %charging battery
+                    if BatterySOC > 0.7
+                        PowerMotorRequest = 50; %discharge battery
+                    end
+                end
             end
             RewardMean = mean(RewardFinal);
             Time = (1:DurationTimeStep:DurationTimeStep*length(RewardFinal(:,1)))'-1; %sec
