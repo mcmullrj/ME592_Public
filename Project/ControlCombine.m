@@ -115,6 +115,9 @@ while TimeCumulative < DurationTimeStep
     TimeCumulative = TimeCumulative+TimeGrid(Grid);
     Grid = Grid+1;
 end
+if Grid > length(Error2SpeedCombine(:,1))
+    Grid = length(Error2SpeedCombine(:,1));
+end
 FieldIndexEndTimeStep = FieldIndexStartTimeStep+Grid-1;
 SpeedCombineGrid = SpeedCombineGrid(1:Grid);
 CropRateNormGrid = CropRateNormGrid(1:Grid);
@@ -128,7 +131,7 @@ PowerMotorGrid = PowerMotorGrid(1:Grid);
 EfficiencyGrainHarvestGrid = interp2(CombineSettingNorm,FlowCropNorm,GrainEfficiency,CombineSettingSetpoint.*ones(size(CropRateNormGrid)),CropRateNormGrid);
 GrainPerGrid = FieldPath(FieldIndexStartTimeStep:FieldIndexEndTimeStep,3).*EfficiencyGrainHarvestGrid;
 GrainHarvestRate = sum(GrainPerGrid)/(TimeCumulative/3600);
-SpecificFuelConsumptionGrid = (interp1(NormFuelEfficiencyVsPower(:,1),NormFuelEfficiencyVsPower(:,2),PowerEngineGrid/EnginePowerRef))*FuelEfficiencyRef; %g/kW/hr
+SpecificFuelConsumptionGrid = (interp1(NormFuelEfficiencyVsPower(:,1),NormFuelEfficiencyVsPower(:,2),PowerEngineGrid/EnginePowerRef,'linear','extrap'))*FuelEfficiencyRef; %g/kW/hr
 FuelRateGrid = SpecificFuelConsumptionGrid.*PowerEngineGrid/(0.82*3.785*1000); %gal/hr
 FuelConsumptionGrid = FuelRateGrid.*(TimeGrid./3600); %gal
 FuelRate = sum(FuelConsumptionGrid)/(TimeCumulative/3600);
