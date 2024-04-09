@@ -4,6 +4,7 @@ classdef CombineRL
     properties
         Environment = [];
         Agent = [];
+        SimulationResults = [];
     end
     
     methods
@@ -97,7 +98,7 @@ classdef CombineRL
             AreaFieldGrid = (DistanceFieldGrid^2)/4047; %acres
             %create one long field pass for harvest
             RowsHeader = obj.Environment.Combine.Design(1);
-            Turnaround = zeros(RowsHeader*4,2);
+            Turnaround = zeros(RowsHeader*5,2);
             FieldPassBreakpoints = (1:RowsHeader:length(obj.Environment.FieldMap.GridColumns));
             FieldLong = [];
             OddPass = 1;
@@ -136,7 +137,7 @@ classdef CombineRL
             obj.Agent.Control.FieldIndexStart = StartingFieldIndex;
         end
         
-        function [StateVectorFinal,RewardFinal,DiagnosticsFinal,RewardMean] = OperateCombine(obj)
+        function obj = OperateCombine(obj)
             %solve path through virtual field
             %
             %define invariants
@@ -150,7 +151,7 @@ classdef CombineRL
             PowerEngineRequest = obj.Agent.Control.InitialState(3);
             PowerMotorRequest = obj.Agent.Control.InitialState(2);
             FieldIndexStart = obj.Agent.Control.FieldIndexStart; %start at first grid
-            CombineSettingSetpoint = 1.0;
+            CombineControlSetpoint = 1.0;
             %
             %
             %reward definition
@@ -178,6 +179,12 @@ classdef CombineRL
             %field definition
             if FieldIndexStart > 1 && FieldIndexStart < length(FieldPath(:,1))
                 FieldPath = [obj.Environment.Harvest.FieldPath(FieldIndexStart:end,:);obj.Environment.Harvest.FieldPath(1:FieldIndexStart-1,:)];
+            elseif FieldIndexStart <= -1 && FieldIndexStart > -length(FieldPath(:,1)) %flip directions
+                FieldPath = obj.Environment.Harvest.FieldPath(:,1);
+                FieldPath(:,2:3) = flipud(obj.Environment.Harvest.FieldPath(:,2:3));
+                if FieldIndexStart ~= -1
+                    FieldPath = [obj.Environment.Harvest.FieldPath(abs(FieldIndexStart):end,:);obj.Environment.Harvest.FieldPath(1:abs(FieldIndexStart)-1,:)];
+                end
             else
                 FieldPath = obj.Environment.Harvest.FieldPath;
             end
@@ -187,22 +194,29 @@ classdef CombineRL
             %
             %
             %simulate combine through field
+            ControlInputVectorFinal = [];
             StateVectorFinal = [];
             RewardFinal = [];
             DiagnosticsFinal = [];
             FieldIndexStartTimeStep = 1;
             MaxFieldIndexStart = (length(FieldPath(:,1))-max(GridsPerTimeStepInterp));
             while FieldIndexStartTimeStep < MaxFieldIndexStart
-                [StateVector,Reward,Diagnostics] = ControlCombine(FieldIndexStartTimeStep,BatterySOC,PowerEngineRequest,PowerMotorRequest,CombineSettingSetpoint);
+                [StateVector,Reward,Diagnostics] = ControlCombine(FieldIndexStartTimeStep,BatterySOC,PowerEngineRequest,PowerMotorRequest,CombineControlSetpoint);
                 FieldIndexStartTimeStep = StateVector(1);
                 BatterySOC = StateVector(4);
                 StateVectorFinal = [StateVectorFinal;StateVector];
                 RewardFinal = [RewardFinal;Reward];
                 DiagnosticsFinal = [DiagnosticsFinal;Diagnostics];
+                ControlInputVectorFinal = [ControlInputVectorFinal;[PowerEngineRequest,PowerMotorRequest,CombineControlSetpoint]];
                 %feedback controller
+                %combine control
+                ControlCombineSetpointMax = 0.7*(StateVector(2)/10)+0.35;
+                Gain = obj.Agent.Control.Gains(1);
+                CombineControlSetpoint = CombineControlSetpoint+Gain*(ControlCombineSetpointMax-CombineControlSetpoint);
+                %battery charge/discharge
                 if PowerMotorRequest >= 0 %using battery energy
-                    if BatterySOC < 0.3
-                        PowerMotorRequest = -25; %charge battery
+                    if BatterySOC < 0.2% || Diagnostics(1) < 0.9*PowerEngineRequest
+                        PowerMotorRequest = -40; %charge battery
                     end
                 else %charging battery
                     if BatterySOC > 0.7
@@ -210,46 +224,67 @@ classdef CombineRL
                     end
                 end
             end
-            RewardMean = mean(RewardFinal);
+            obj.SimulationResults.RewardMean = mean(RewardFinal);
             Time = (1:DurationTimeStep:DurationTimeStep*length(RewardFinal(:,1)))'-1; %sec
-            StateVectorFinal = [Time,StateVectorFinal];
-            RewardFinal = [Time,RewardFinal];
-            DiagnosticsFinal = [Time,DiagnosticsFinal];
+            obj.SimulationResults.ControlInputVector = [Time,ControlInputVectorFinal];
+            obj.SimulationResults.StateVector = [Time,StateVectorFinal];
+            obj.SimulationResults.Reward = [Time,RewardFinal];
+            obj.SimulationResults.Diagnostics = [Time,DiagnosticsFinal];
             %
             %
+        end
+        
+        function PlotSimulationResults(obj)
+            %plot simulation
+            ControlVector = obj.SimulationResults.ControlInputVector;
+            StateVector = obj.SimulationResults.StateVector;
+            Reward = obj.SimulationResults.Reward;
+            Diagnostics = obj.SimulationResults.Diagnostics;
             %plot results
             figure(1)
-            plot(StateVectorFinal(:,1),StateVectorFinal(:,3))
+            plot(ControlVector(:,1),ControlVector(:,4))
+            xlabel('Time (sec)')
+            ylabel('Combine Control Setting')
+            %
+            figure(2)
+            plot(ControlVector(:,1),ControlVector(:,2:3))
+            xlabel('Time (sec)')
+            ylabel('Power Request (kW)')
+            legend('Engine','Motor')
+            %
+            figure(3)
+            plot(StateVector(:,1),StateVector(:,3))
             xlabel('Time (sec)')
             ylabel('Combine Speed (km/hr)')
             %
-            figure(2)
-            plot(StateVectorFinal(:,1),StateVectorFinal(:,4).*100)
+            figure(4)
+            plot(StateVector(:,1),StateVector(:,4).*100)
             xlabel('Time (sec)')
             ylabel('Grain Harvest Efficiency (%)')
             %
-            figure(3)
-            plot(StateVectorFinal(:,1),StateVectorFinal(:,5))
+            figure(5)
+            plot(StateVector(:,1),StateVector(:,5))
             xlabel('Time (sec)')
             ylabel('Battery State of Charge')
             %
-            figure(4)
-            plot(RewardFinal(:,1),RewardFinal(:,2))
+            figure(6)
+            plot(Reward(:,1),Reward(:,2))
             xlabel('Time (sec)')
             ylabel('Reward ($/hr)')
             %
-            figure(5)
-            plot(DiagnosticsFinal(:,1),DiagnosticsFinal(:,2))
+            figure(7)
+            plot(Diagnostics(:,1),Diagnostics(:,2))
             xlabel('Time (sec)')
             ylabel('Engine Power (kW)')
             %
-            figure(6)
-            plot(DiagnosticsFinal(:,1),DiagnosticsFinal(:,3))
+            figure(8)
+            plot(Diagnostics(:,1),Diagnostics(:,3))
             xlabel('Time (sec)')
             ylabel('Battery Power (kW)')
             %
             %
         end
+        
     end
 end
 
