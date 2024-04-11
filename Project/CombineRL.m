@@ -39,7 +39,7 @@ classdef CombineRL
             %
             %create yield map for field
             %assign yield map to 10-acre subplots
-            LengthWidthYieldSubplot = (10*4047)^0.5; %m
+            LengthWidthYieldSubplot = (5*4047)^0.5; %m
             if LengthWidthField > LengthWidthYieldSubplot
                 YieldCoordinate = (0:LengthWidthYieldSubplot:LengthWidthField); %m, yield row vector
                 YieldCoordinate(end+1) = YieldCoordinate(end)+LengthWidthYieldSubplot; %m, extend yield mapping
@@ -166,8 +166,8 @@ classdef CombineRL
             GrainEfficiency = obj.Environment.Combine.Performance.GrainEfficiency;
             NormFuelEfficiencyVsPower = obj.Environment.Combine.Performance.NormFuelEfficiencyVsPower;
             BatteryCapacity = obj.Environment.Combine.Design(3); %kWh
-            BatteryMaxChargeRate = obj.Environment.Combine.Design(3); %kWh
-            BatteryMaxDischargeRate = obj.Environment.Combine.Design(3); %kWh
+            BatteryMaxChargeRate = obj.Environment.Combine.Design(4); %kWh
+            BatteryMaxDischargeRate = obj.Environment.Combine.Design(5); %kWh
             MotorEfficiency = obj.Environment.Combine.Design(3); %kWh
             FlowCropRef = obj.Environment.Combine.Performance.FlowCropRef;
             SpeedCombineRef = obj.Environment.Combine.Performance.SpeedCombineRef;
