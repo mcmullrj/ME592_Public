@@ -7,13 +7,14 @@ function [StateVector,Reward,IsDone,LoggedSignals] = ControlCombineEnvironment(A
 global DurationTimeStep FieldPath SpeedCombineInterp CombineSettingNorm FlowCropNorm PowerGrainProcessNorm GrainEfficiency NormFuelEfficiencyVsPower...
     FlowCropRef SpeedCombineRef TotalPowerRef EnginePowerRef FuelEfficiencyRef BatteryCapacity BatteryMaxChargeRate BatteryMaxDischargeRate MotorEfficiency GrainPrice FuelPrice
 %
+% SpeedCombineInterp = (0:0.02:1).*SpeedCombineRef.*1000./3600; %m/sec
 %
 %% inputs
 PowerEngineRequest = Actions(1);
 PowerMotorRequest = Actions(2);
 CombineSettingSetpoint = Actions(3);
-BatterySOCStartTimeStep = LoggedSignals(1);
-FieldIndexStartTimeStep = LoggedSignals(2);
+BatterySOCStartTimeStep = LoggedSignals.StartTimeStep(1);
+FieldIndexStartTimeStep = LoggedSignals.StartTimeStep(2);
 %
 %
 %% adjust power inputs based on system state
@@ -159,9 +160,9 @@ BatterySOC = BatterySOCGrid(end);
 %% outputs
 StateVector = [SpeedCombine,EfficiencyGrainHarvest,BatterySOC];
 Reward = GrainHarvestValue-FuelCost;
-% Diagnostics = [PowerEngineMean,PowerMotorMean,CropRateNorm,FuelRate];
+% LoggedSignals.Diagnostics = [PowerEngineMean,PowerMotorMean,CropRateNorm,FuelRate];
 FieldIndexStartNextTimeStep = FieldIndexEndTimeStep+1;
-LoggedSignals = [BatterySOC,FieldIndexStartNextTimeStep];
+LoggedSignals.StartTimeStep = [BatterySOC,FieldIndexStartNextTimeStep];
 if (length(FieldPath(:,1))-max(GridsPerTimeStepInterp)) < FieldIndexStartNextTimeStep %not enough field left to evaluate next time step
     IsDone = 1;
 else
