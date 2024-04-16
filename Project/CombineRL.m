@@ -5,6 +5,7 @@ classdef CombineRL
         Environment = [];
         Agent = [];
         SimulationResults = [];
+        RLModel = [];
     end
     
     methods
@@ -152,6 +153,7 @@ classdef CombineRL
             PowerMotorRequest = obj.Agent.Control.InitialState(2);
             FieldIndexStart = obj.Agent.Control.FieldIndexStart; %start at first grid
             CombineControlSetpoint = 1.0;
+            FieldIndexStartTimeStep = 1;
             %
             %
             %reward definition
@@ -188,9 +190,7 @@ classdef CombineRL
             else
                 FieldPath = obj.Environment.Harvest.FieldPath;
             end
-            FieldMapGridDistance = FieldPath(2,1)-FieldPath(1,1); %m/grid
             SpeedCombineInterp = (0:0.02:1).*SpeedCombineRef.*1000./3600; %m/sec
-            GridsPerTimeStepInterp = (SpeedCombineInterp./FieldMapGridDistance).*DurationTimeStep;
             %
             %
             %simulate combine through field
@@ -198,33 +198,32 @@ classdef CombineRL
             StateVectorFinal = [];
             RewardFinal = [];
             DiagnosticsFinal = [];
-            FieldIndexStartTimeStep = 1;
-            MaxFieldIndexStart = (length(FieldPath(:,1))-max(GridsPerTimeStepInterp));
-            while FieldIndexStartTimeStep < MaxFieldIndexStart
-                [StateVector,Reward,Diagnostics] = ControlCombine(FieldIndexStartTimeStep,BatterySOC,PowerEngineRequest,PowerMotorRequest,CombineControlSetpoint);
-                FieldIndexStartTimeStep = StateVector(1);
-                BatterySOC = StateVector(4);
+            Actions = [PowerEngineRequest,PowerMotorRequest,CombineControlSetpoint];
+            LoggedSignals.StartTimeStep = [BatterySOC,FieldIndexStartTimeStep];
+            IsDone = 0;
+            while IsDone == 0
+                [StateVector,Reward,IsDone,LoggedSignals] = ControlCombineEnvironment(Actions,LoggedSignals);
                 StateVectorFinal = [StateVectorFinal;StateVector];
                 RewardFinal = [RewardFinal;Reward];
-                DiagnosticsFinal = [DiagnosticsFinal;Diagnostics];
-                ControlInputVectorFinal = [ControlInputVectorFinal;[PowerEngineRequest,PowerMotorRequest,CombineControlSetpoint]];
+                DiagnosticsFinal = [DiagnosticsFinal;LoggedSignals.Diagnostics];
+                ControlInputVectorFinal = [ControlInputVectorFinal;Actions];
                 %feedback controller
                 %combine control
-                ControlCombineSetpointMax = 0.7*(StateVector(2)/10)+0.35;
+                ControlCombineSetpointMax = 0.7*(StateVector(1)/10)+0.35;
                 Gain = obj.Agent.Control.Gains(1);
-                CombineControlSetpoint = CombineControlSetpoint+Gain*(ControlCombineSetpointMax-CombineControlSetpoint);
+                Actions(3) = Actions(3)+Gain*(ControlCombineSetpointMax-Actions(3));
                 %battery charge/discharge
-                if PowerMotorRequest >= 0 %using battery energy
-                    if BatterySOC < 0.2% || Diagnostics(1) < 0.9*PowerEngineRequest
-                        PowerMotorRequest = -40; %charge battery
+                if Actions(2) >= 0 %using battery energy
+                    if StateVector(3) < 0.2% || Diagnostics(1) < 0.9*PowerEngineRequest
+                        Actions(2) = -40; %charge battery
                     end
                 else %charging battery
-                    if BatterySOC > 0.7
-                        PowerMotorRequest = 50; %discharge battery
+                    if StateVector(3) > 0.7
+                        Actions(2) = 50; %discharge battery
                     end
                 end
             end
-            obj.SimulationResults.RewardMean = mean(RewardFinal);
+            obj.SimulationResults.RewardCumulative = sum(RewardFinal);
             Time = (1:DurationTimeStep:DurationTimeStep*length(RewardFinal(:,1)))'-1; %sec
             obj.SimulationResults.ControlInputVector = [Time,ControlInputVectorFinal];
             obj.SimulationResults.StateVector = [Time,StateVectorFinal];
@@ -253,24 +252,24 @@ classdef CombineRL
             legend('Engine','Motor')
             %
             figure(3)
-            plot(StateVector(:,1),StateVector(:,3))
+            plot(StateVector(:,1),StateVector(:,2))
             xlabel('Time (sec)')
             ylabel('Combine Speed (km/hr)')
             %
             figure(4)
-            plot(StateVector(:,1),StateVector(:,4).*100)
+            plot(StateVector(:,1),StateVector(:,3).*100)
             xlabel('Time (sec)')
             ylabel('Grain Harvest Efficiency (%)')
             %
             figure(5)
-            plot(StateVector(:,1),StateVector(:,5))
+            plot(StateVector(:,1),StateVector(:,4))
             xlabel('Time (sec)')
             ylabel('Battery State of Charge')
             %
             figure(6)
             plot(Reward(:,1),Reward(:,2))
             xlabel('Time (sec)')
-            ylabel('Reward ($/hr)')
+            ylabel('Reward ($ per time step)')
             %
             figure(7)
             plot(Diagnostics(:,1),Diagnostics(:,2))
@@ -283,6 +282,57 @@ classdef CombineRL
             ylabel('Battery Power (kW)')
             %
             %
+        end
+
+        function obj = BuildRLModel(obj)
+            %define invariants
+            global DurationTimeStep FieldPath SpeedCombineInterp CombineSettingNorm FlowCropNorm PowerGrainProcessNorm GrainEfficiency NormFuelEfficiencyVsPower...
+                FlowCropRef SpeedCombineRef TotalPowerRef EnginePowerRef FuelEfficiencyRef BatteryCapacity BatteryMaxChargeRate BatteryMaxDischargeRate MotorEfficiency GrainPrice FuelPrice
+            %
+            %control settings
+            DurationTimeStep = obj.Agent.Control.TimeStepStateUpdate;
+            %
+            %reward definition
+            GrainPrice = obj.Agent.Reward.GrainValue;
+            FuelPrice = obj.Agent.Reward.FuelValue;
+            %
+            %combine definition
+            CombineSettingNorm = obj.Environment.Combine.Performance.CombineSettingNorm;
+            FlowCropNorm = obj.Environment.Combine.Performance.FlowCropNorm;
+            PowerGrainProcessNorm = obj.Environment.Combine.Performance.PowerGrainProcessNorm;
+            GrainEfficiency = obj.Environment.Combine.Performance.GrainEfficiency;
+            NormFuelEfficiencyVsPower = obj.Environment.Combine.Performance.NormFuelEfficiencyVsPower;
+            BatteryCapacity = obj.Environment.Combine.Design(3); %kWh
+            BatteryMaxChargeRate = obj.Environment.Combine.Design(4); %kWh
+            BatteryMaxDischargeRate = obj.Environment.Combine.Design(5); %kWh
+            MotorEfficiency = obj.Environment.Combine.Design(3); %kWh
+            FlowCropRef = obj.Environment.Combine.Performance.FlowCropRef;
+            SpeedCombineRef = obj.Environment.Combine.Performance.SpeedCombineRef;
+            TotalPowerRef = obj.Environment.Combine.Performance.TotalPowerRef;
+            EnginePowerRef = obj.Environment.Combine.Performance.EnginePowerRef;
+            FuelEfficiencyRef = obj.Environment.Combine.Performance.FuelEfficiencyRef;
+            %
+            %field definition
+            FieldPath = obj.Environment.Harvest.FieldPath;
+            SpeedCombineInterp = (0:0.02:1).*SpeedCombineRef.*1000./3600; %m/sec
+            %
+            %build rl objects for Matlab
+            Actions = rlNumericSpec([1,3],'LowerLimit',[220,-obj.Environment.Combine.Design(4),0.85],'UpperLimit',[obj.Environment.Combine.Performance.EnginePowerRef,obj.Environment.Combine.Design(5),1.15]);
+            States = rlNumericSpec([1,3]);
+            obj.RLModel.RLEnvironment = rlFunctionEnv(States,Actions,'ControlCombineEnvironment','InitializeCombineEnvironment');
+            AgentInitializeProps = rlAgentInitializationOptions('NumHiddenUnit',128);
+%             AgentProps = rlPPOAgentOptions('ExperienceHorizon',128);
+            obj.RLModel.RLAgent = rlPPOAgent(States,Actions,AgentInitializeProps);
+        end
+
+        function TrainingInfo = TrainRLModel(obj)
+
+            trainOpts = rlTrainingOptions;
+            trainOpts.MaxEpisodes = 500;
+            trainOpts.StopTrainingCriteria = 'EpisodeCount';
+
+            TrainingInfo = train(obj.RLModel.RLAgent,obj.RLModel.RLEnvironment,trainOpts);
+
         end
         
     end
