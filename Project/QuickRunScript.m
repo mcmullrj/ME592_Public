@@ -19,15 +19,15 @@ FieldModel = FieldModel.CreateCombine(RowsPerPass,EnginePower,BatteryCapacity);
 %build harvest path through field
 FieldModel = FieldModel.DefineHarvestPath;
 %define control
-GrainValue = 0.2; % ?$?, not really
-FuelValue = 5; % ?$?
+GrainValue = 0.04; % ?$?
+FuelValue = 1; % ?$?
 ControlSettings = [20,0.5,0,0.500000000000000,50,300]; %time step for control update, proportional gain, integral gain, initial battery SOC, initial motor power, initial engine power
 StartingIndex = 1; %grid in field path to start harvest
 FieldModel = FieldModel.DefineControl(GrainValue,FuelValue,ControlSettings,StartingIndex);
 %solve with baseline (classical) controls
 FieldModel = FieldModel.OperateCombine;
 %plot simulation results
-FieldModel.PlotSimulationResults
+FieldModel.PlotSimulationResults(0)
 %write desired results to csv's
 
 %

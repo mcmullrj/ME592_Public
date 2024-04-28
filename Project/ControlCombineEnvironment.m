@@ -5,7 +5,8 @@ function [StateVector,Reward,IsDone,LoggedSignals] = ControlCombineEnvironment(A
 %
 %% define invariants
 global DurationTimeStep FieldPath SpeedCombineInterp CombineSettingNorm FlowCropNorm PowerGrainProcessNorm GrainEfficiency NormFuelEfficiencyVsPower...
-    FlowCropRef SpeedCombineRef TotalPowerRef EnginePowerRef FuelEfficiencyRef BatteryCapacity BatteryMaxChargeRate BatteryMaxDischargeRate MotorEfficiency GrainPrice FuelPrice
+    FlowCropRef SpeedCombineRef TotalPowerRef EnginePowerRef FuelEfficiencyRef BatteryCapacity BatteryMaxChargeRate BatteryMaxDischargeRate MotorEfficiency...
+    GrainPrice FuelPrice MaxHarvestDuration
 %
 %
 %
@@ -15,16 +16,31 @@ PowerMotorRequest = Actions(2);
 CombineSettingSetpoint = Actions(3);
 BatterySOCStartTimeStep = LoggedSignals.StartTimeStep(1);
 FieldIndexStartTimeStep = LoggedSignals.StartTimeStep(2);
+TimeCumulativeField = LoggedSignals.StartTimeStep(3);
 %limit inputs
 if PowerEngineRequest < 0
     PowerEngineRequest = 0;
 elseif PowerEngineRequest > EnginePowerRef
     PowerEngineRequest = EnginePowerRef;
 end
+if PowerMotorRequest > BatteryMaxDischargeRate*MotorEfficiency
+    PowerMotorRequest = BatteryMaxDischargeRate*MotorEfficiency;
+elseif PowerMotorRequest < -BatteryMaxChargeRate
+    PowerMotorRequest = -BatteryMaxChargeRate;
+end
 if CombineSettingSetpoint < 0.1
     CombineSettingSetpoint = 0.1;
 elseif CombineSettingSetpoint > 1.7
     CombineSettingSetpoint = 1.7;
+end
+if BatterySOCStartTimeStep <= 0.1
+    if PowerMotorRequest > 0
+        PowerMotorRequest = 0;
+    end
+elseif BatterySOCStartTimeStep >= 0.9
+    if PowerMotorRequest < 0
+        PowerMotorRequest = 0;
+    end
 end
 %
 %
@@ -32,12 +48,6 @@ end
 BatteryEnergy = BatterySOCStartTimeStep.*BatteryCapacity; %kWh
 PowerMotor = PowerMotorRequest; %kW
 PowerEngine = PowerEngineRequest; %kW
-%physical limits for power requests
-if PowerMotor > BatteryMaxDischargeRate*MotorEfficiency
-    PowerMotor = BatteryMaxDischargeRate*MotorEfficiency;
-elseif PowerMotor < -BatteryMaxChargeRate
-    PowerMotor = -BatteryMaxChargeRate;
-end
 %normalized power
 PowerNorm = (PowerEngine+PowerMotor)/TotalPowerRef;
 %overspecified power: meet requested engine power, reduce motor power to
@@ -88,21 +98,53 @@ for k1 = 1:length(Error2SpeedCombine(:,1))
         BatteryEnergyGrid(k1) = BatteryEnergyGrid(k1-1)+dBatteryEnergy(IndexSpeedSolution);
     end
     BatterySOCGrid(k1) = BatteryEnergyGrid(k1)/BatteryCapacity;
-    if BatterySOCGrid(k1) < 0.1 && PowerMotor > 0
-        %stop discharging battery and recalculate speed error
-        PowerMotor = 0;
-        PowerNorm = PowerEngine/TotalPowerRef;
+    %update to correct error
+    if BatterySOCGrid(k1) > 0.9
+        BatterySOCGrid(k1) = 0.9;
+        PowerMotor = 0; %start discharging
+        dBatteryEnergy = -PowerMotor.*(TimePerGrid./3600);
+        PowerNorm = (PowerEngine+PowerMotor)/TotalPowerRef;
+        if PowerNorm > 1
+            PowerNorm = 1;
+            PowerMotor = PowerNorm*TotalPowerRef-PowerEngine;
+        end
         PowerNormForPropulsion(k1:end,:) = PowerNorm-PowerNormGrainHarvestInterp(k1:end,:);
         SpeedFromPower(k1:end,:) = (PowerNormForPropulsion(k1:end,:)./MaxPowerNormForPropulsion).^0.5.*(SpeedCombineRef*1000/3600);
         Error2SpeedCombine(k1:end,:) = (ones(length(SpeedFromPower(k1:end,1)),1)*SpeedCombineInterp-SpeedFromPower(k1:end,:)).^2; %squared error
-    elseif BatterySOCGrid(k1) > 0.9 && PowerMotor < 0
-        %stop charging battery and recalculate speed error
-        PowerMotor = 0;
-        PowerNorm = PowerEngine/TotalPowerRef;
+        PowerMotorGrid(k1) = PowerMotor;
+    elseif BatterySOCGrid(k1) < 0.1
+        BatterySOCGrid(k1) = 0.1;
+        PowerMotor = 0; %start charging
+        dBatteryEnergy = -PowerMotor.*(TimePerGrid./3600);
+        PowerNorm = (PowerEngine+PowerMotor)/TotalPowerRef;
+        if PowerNorm > 1
+            PowerNorm = 1;
+            PowerMotor = PowerNorm*TotalPowerRef-PowerEngine;
+        end
         PowerNormForPropulsion(k1:end,:) = PowerNorm-PowerNormGrainHarvestInterp(k1:end,:);
         SpeedFromPower(k1:end,:) = (PowerNormForPropulsion(k1:end,:)./MaxPowerNormForPropulsion).^0.5.*(SpeedCombineRef*1000/3600);
-        Error2SpeedCombine(k1:end,:) = (ones(length(SpeedFromPower(k1:end,1)),1)*SpeedCombineInterp-SpeedFromPower(k1:end,:)).^2; %squared error        
+        Error2SpeedCombine(k1:end,:) = (ones(length(SpeedFromPower(k1:end,1)),1)*SpeedCombineInterp-SpeedFromPower(k1:end,:)).^2; %squared error
+        PowerMotorGrid(k1) = PowerMotor;
     end
+    BatteryEnergyGrid(k1) = BatterySOCGrid(k1).*BatteryCapacity;
+    %
+    %original code
+%     if BatterySOCGrid(k1) < 0.1 && PowerMotor > 0
+%         %stop discharging battery and recalculate speed error
+%         PowerMotor = 0;
+%         PowerNorm = PowerEngine/TotalPowerRef;
+%         PowerNormForPropulsion(k1:end,:) = PowerNorm-PowerNormGrainHarvestInterp(k1:end,:);
+%         SpeedFromPower(k1:end,:) = (PowerNormForPropulsion(k1:end,:)./MaxPowerNormForPropulsion).^0.5.*(SpeedCombineRef*1000/3600);
+%         Error2SpeedCombine(k1:end,:) = (ones(length(SpeedFromPower(k1:end,1)),1)*SpeedCombineInterp-SpeedFromPower(k1:end,:)).^2; %squared error
+%     elseif BatterySOCGrid(k1) > 0.9 && PowerMotor < 0
+%         %stop charging battery and recalculate speed error
+%         PowerMotor = 0;
+%         PowerNorm = PowerEngine/TotalPowerRef;
+%         PowerNormForPropulsion(k1:end,:) = PowerNorm-PowerNormGrainHarvestInterp(k1:end,:);
+%         SpeedFromPower(k1:end,:) = (PowerNormForPropulsion(k1:end,:)./MaxPowerNormForPropulsion).^0.5.*(SpeedCombineRef*1000/3600);
+%         Error2SpeedCombine(k1:end,:) = (ones(length(SpeedFromPower(k1:end,1)),1)*SpeedCombineInterp-SpeedFromPower(k1:end,:)).^2; %squared error        
+%     end
+    %
     %check if combine is at its governed speed limit
     if IndexSpeedSolution == length(Error2SpeedCombine(k1,:))
         %combine is at its governed speed limit
@@ -113,7 +155,7 @@ for k1 = 1:length(Error2SpeedCombine(:,1))
     TimeGrid(k1) = TimePerGrid(IndexSpeedSolution);
     SpeedCombineGrid(k1) = SpeedCombineInterp(IndexSpeedSolution)/1000*3600; %km/hr
     CropRateNormGrid(k1) = CropRateNormInterp(k1,IndexSpeedSolution);
-    PowerMotorGrid(k1) = PowerMotor;
+    %PowerMotorGrid(k1) = PowerMotor;
 end
 %
 %
@@ -150,6 +192,9 @@ FuelRate = sum(FuelConsumptionGrid)/(TimeCumulative/3600);
 GrainHarvested = sum(GrainPerGrid); %bu in time step
 FuelConsumed = sum(FuelConsumptionGrid); %gal in time step
 GrainHarvestValue = GrainHarvested*GrainPrice; %$
+if TimeCumulativeField > MaxHarvestDuration
+    GrainHarvestValue = GrainHarvested*(GrainPrice*0.75); %$
+end
 FuelCost = FuelConsumed*FuelPrice; %$
 %
 %
@@ -160,6 +205,7 @@ CropRateNorm = sum(CropRateNormGrid.*(TimeGrid./TimeCumulative));
 PowerEngineMean = sum(PowerEngineGrid.*(TimeGrid./TimeCumulative));
 PowerMotorMean = sum(PowerMotorGrid.*(TimeGrid./TimeCumulative));
 BatterySOC = BatterySOCGrid(end);
+TimeCumulativeField = TimeCumulativeField+TimeCumulative;
 %
 %
 %% outputs
@@ -167,7 +213,7 @@ StateVector = [SpeedCombine,EfficiencyGrainHarvest,BatterySOC];
 Reward = GrainHarvestValue-FuelCost;
 LoggedSignals.Diagnostics = [PowerEngineMean,PowerMotorMean,CropRateNorm,FuelRate];
 FieldIndexStartNextTimeStep = FieldIndexEndTimeStep+1;
-LoggedSignals.StartTimeStep = [BatterySOC,FieldIndexStartNextTimeStep];
+LoggedSignals.StartTimeStep = [BatterySOC,FieldIndexStartNextTimeStep,TimeCumulativeField];
 if (length(FieldPath(:,1))-max(GridsPerTimeStepInterp)) < FieldIndexStartNextTimeStep %not enough field left to evaluate next time step
     IsDone = 1;
 else
