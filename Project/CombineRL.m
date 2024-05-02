@@ -170,8 +170,8 @@ classdef CombineRL
             GrainEfficiency = obj.Environment.Combine.Performance.GrainEfficiency;
             NormFuelEfficiencyVsPower = obj.Environment.Combine.Performance.NormFuelEfficiencyVsPower;
             BatteryCapacity = obj.Environment.Combine.Design(3); %kWh
-            BatteryMaxChargeRate = obj.Environment.Combine.Design(4); %kWh
-            BatteryMaxDischargeRate = obj.Environment.Combine.Design(5); %kWh
+            BatteryMaxChargeRate = obj.Environment.Combine.Design(4); %kW
+            BatteryMaxDischargeRate = obj.Environment.Combine.Design(5); %kW
             MotorEfficiency = obj.Environment.Combine.Design(3); %kWh
             FlowCropRef = obj.Environment.Combine.Performance.FlowCropRef;
             SpeedCombineRef = obj.Environment.Combine.Performance.SpeedCombineRef;
@@ -201,8 +201,8 @@ classdef CombineRL
             StateVectorFinal = [];
             RewardFinal = [];
             DiagnosticsFinal = [];
-            Actions = [PowerEngineRequest,PowerMotorRequest,CombineControlSetpoint];
-%             Actions = [300,60,0.93];
+            Actions = [PowerEngineRequest/EnginePowerRef,PowerMotorRequest/BatteryMaxDischargeRate,CombineControlSetpoint];
+%             Actions = [1,1,0.93];
             [InitialObservation,LoggedSignals] = InitializeCombineEnvironment();
 %             LoggedSignals.StartTimeStep = [BatterySOC,FieldIndexStartTimeStep];
             IsDone = 0;
@@ -214,21 +214,22 @@ classdef CombineRL
                 ControlInputVectorFinal = [ControlInputVectorFinal;Actions];
                 %feedback controller
                 %combine control
-                ControlCombineSetpointMax = 0.7*(StateVector(1)/10)+0.35;
+                ControlCombineSetpointMax = 0.7*(StateVector(1))+0.35;
                 Gain = obj.Agent.Control.Gains(1);
                 Actions(3) = Actions(3)+Gain*(ControlCombineSetpointMax-Actions(3));
 %                 Actions(3) = 0.93;
                 %battery charge/discharge
                 if Actions(2) >= 0 %using battery energy
                     if StateVector(3) <= 0.2% || Diagnostics(1) < 0.9*PowerEngineRequest
-                        Actions(2) = -21; %charge battery
+                        Actions(2) = -21/BatteryMaxDischargeRate; %charge battery
                     end
                 else %charging battery
                     if StateVector(3) >= 0.7
-                        Actions(2) = 50; %discharge battery
+                        Actions(2) = 50/BatteryMaxDischargeRate; %discharge battery
                     end
                 end
             end
+            StateVectorFinal(:,1) = StateVectorFinal(:,1).*10; %get combine speed back to km/hr
             obj.SimulationResults.RewardCumulative = sum(RewardFinal);
             Time = (1:DurationTimeStep:DurationTimeStep*length(RewardFinal(:,1)))'-1; %sec
             obj.SimulationResults.ControlInputVector = [Time,ControlInputVectorFinal];
@@ -272,15 +273,15 @@ classdef CombineRL
             %
             figure(2)
             if PlotFlag == 0 || PlotFlag == 2
-                plot(ControlVector(:,1),ControlVector(:,2:3))
+                plot(ControlVector(:,1),ControlVector(:,2).*obj.Environment.Combine.Performance.EnginePowerRef,ControlVector(:,1),ControlVector(:,3).*obj.Environment.Combine.Design(5))
                 legend('Engine','Motor')
                 if PlotFlag == 2
                     hold on
-                    plot(ControlVectorRL(:,1),ControlVectorRL(:,2:3))
+                    plot(ControlVectorRL(:,1),ControlVectorRL(:,2).*obj.Environment.Combine.Performance.EnginePowerRef,ControlVectorRL(:,1),ControlVectorRL(:,3).*obj.Environment.Combine.Design(5))
                     legend('Baseline Engine','Baseline Motor','RL Policy Engine','RLPolicyMotor')
                 end
             else
-                plot(ControlVectorRL(:,1),ControlVectorRL(:,2:3))
+                plot(ControlVectorRL(:,1),ControlVectorRL(:,2).*obj.Environment.Combine.Performance.EnginePowerRef,ControlVectorRL(:,1),ControlVectorRL(:,3).*obj.Environment.Combine.Design(5))
                 legend('RL Policy Engine','RLPolicyMotor')
             end
             xlabel('Time (sec)')
@@ -402,7 +403,7 @@ classdef CombineRL
             SpeedCombineInterp = (0:0.02:1).*SpeedCombineRef.*1000./3600; %m/sec
             %
             %build rl objects for Matlab
-            Actions = rlNumericSpec([1,3],'LowerLimit',[230,-obj.Environment.Combine.Design(4),0.85],'UpperLimit',[obj.Environment.Combine.Performance.EnginePowerRef,obj.Environment.Combine.Design(5),1.15]);
+            Actions = rlNumericSpec([1,3],'LowerLimit',[0.75,-obj.Environment.Combine.Design(4)/obj.Environment.Combine.Design(5),0.85],'UpperLimit',[1,1,1.15]);
             States = rlNumericSpec([1,3]);
             obj.RLModel.RLEnvironment = rlFunctionEnv(States,Actions,'ControlCombineEnvironment','InitializeCombineEnvironment');
             AgentInitializeProps = rlAgentInitializationOptions('NumHiddenUnit',128);
@@ -414,6 +415,39 @@ classdef CombineRL
         end
 
         function TrainingInfo = TrainRLModel(obj)
+            %define invariants
+            global DurationTimeStep FieldPath SpeedCombineInterp CombineSettingNorm FlowCropNorm PowerGrainProcessNorm GrainEfficiency NormFuelEfficiencyVsPower...
+                FlowCropRef SpeedCombineRef TotalPowerRef EnginePowerRef FuelEfficiencyRef BatteryCapacity BatteryMaxChargeRate BatteryMaxDischargeRate MotorEfficiency...
+                GrainPrice FuelPrice MaxHarvestDuration
+            %
+            %control settings
+            DurationTimeStep = obj.Agent.Control.TimeStepStateUpdate;
+            %
+            %reward definition
+            GrainPrice = obj.Agent.Reward.GrainValue;
+            FuelPrice = obj.Agent.Reward.FuelValue;
+            %
+            %combine definition
+            CombineSettingNorm = obj.Environment.Combine.Performance.CombineSettingNorm;
+            FlowCropNorm = obj.Environment.Combine.Performance.FlowCropNorm;
+            PowerGrainProcessNorm = obj.Environment.Combine.Performance.PowerGrainProcessNorm;
+            GrainEfficiency = obj.Environment.Combine.Performance.GrainEfficiency;
+            NormFuelEfficiencyVsPower = obj.Environment.Combine.Performance.NormFuelEfficiencyVsPower;
+            BatteryCapacity = obj.Environment.Combine.Design(3); %kWh
+            BatteryMaxChargeRate = obj.Environment.Combine.Design(4); %kWh
+            BatteryMaxDischargeRate = obj.Environment.Combine.Design(5); %kWh
+            MotorEfficiency = obj.Environment.Combine.Design(3); %kWh
+            FlowCropRef = obj.Environment.Combine.Performance.FlowCropRef;
+            SpeedCombineRef = obj.Environment.Combine.Performance.SpeedCombineRef;
+            TotalPowerRef = obj.Environment.Combine.Performance.TotalPowerRef;
+            EnginePowerRef = obj.Environment.Combine.Performance.EnginePowerRef;
+            FuelEfficiencyRef = obj.Environment.Combine.Performance.FuelEfficiencyRef;
+            %
+            %field definition
+            FieldPath = obj.Environment.Harvest.FieldPath;
+            MaxHarvestDuration = obj.Environment.Harvest.MaxDuration;
+            SpeedCombineInterp = (0:0.02:1).*SpeedCombineRef.*1000./3600; %m/sec
+            %
             %
 %             trainOpts = rlTrainingOptions(...
 %                 'MaxEpisodes',400,...
@@ -426,10 +460,13 @@ classdef CombineRL
             trainOpts = rlTrainingOptions(...
                 'MaxEpisodes',400,...
                 'MaxStepsPerEpisode',1000,...
-                'ScoreAveragingWindowLength',10,...
+                'ScoreAveragingWindowLength',5,...
                 'SaveAgentCriteria',"EpisodeReward",...
-                'SaveAgentValue',265);                
-            TrainingInfo = train(obj.RLModel.RLAgent,obj.RLModel.RLEnvironment,trainOpts);
+                'SaveAgentValue',254);
+%             TrainingLogger = rlDataLogger();
+%             TrainingLogger.LoggingOptions.LoggingDirectory = "TrainingLog";
+%             TrainingLogger.AgentLearnFinishedFcn = @AgentLearnLoss;
+            TrainingInfo = train(obj.RLModel.RLAgent,obj.RLModel.RLEnvironment,trainOpts);%,Logger=TrainingLogger);
             %
         end
 
@@ -497,6 +534,7 @@ classdef CombineRL
                     SimulationResultsRLRewards(k,2) = RewardsTimeStep(:,:,1);
                 end
             end
+            SimulationResultsRLStates(:,2) = SimulationResultsRLStates(:,2).*10; %convert normalized state to combine speed in km/hr
             SimulationResultsRLTable = array2table([SimulationResultsRLStates,SimulationResultsRLActions(:,2:end),SimulationResultsRLRewards(:,2)]);
             SimulationResultsRLTable.Properties.VariableNames = {'Time_sec','CombineSpeed_kmph','GrainEfficiency','BatterySOC',...
                 'RequestedEnginePower_kW','RequestedMotorPower_kW','CombineControlSetting','Reward_$'};

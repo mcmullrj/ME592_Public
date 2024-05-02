@@ -11,8 +11,8 @@ global DurationTimeStep FieldPath SpeedCombineInterp CombineSettingNorm FlowCrop
 %
 %
 %% inputs
-PowerEngineRequest = Actions(1);
-PowerMotorRequest = Actions(2);
+PowerEngineRequest = Actions(1)*EnginePowerRef;
+PowerMotorRequest = Actions(2)*BatteryMaxDischargeRate;
 CombineSettingSetpoint = Actions(3);
 BatterySOCStartTimeStep = LoggedSignals.StartTimeStep(1);
 FieldIndexStartTimeStep = LoggedSignals.StartTimeStep(2);
@@ -209,7 +209,7 @@ TimeCumulativeField = TimeCumulativeField+TimeCumulative;
 %
 %
 %% outputs
-StateVector = [SpeedCombine,EfficiencyGrainHarvest,BatterySOC];
+StateVector = [SpeedCombine/10,EfficiencyGrainHarvest,BatterySOC];
 Reward = GrainHarvestValue-FuelCost;
 LoggedSignals.Diagnostics = [PowerEngineMean,PowerMotorMean,CropRateNorm,FuelRate];
 FieldIndexStartNextTimeStep = FieldIndexEndTimeStep+1;
